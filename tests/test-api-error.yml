@@ -1,0 +1,45 @@
+name: Test Applivery API error on upload fails the action
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API (upload returns 401)
+        run: |
+          export MOCK_UPLOAD_FAIL=401
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery.out 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8787/health >/dev/null; then echo "mock ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-applivery.out
+          exit 1
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          base-url: http://127.0.0.1:8787/v1/
+          base-uploads-url: http://127.0.0.1:8787/upload/v1/
+          api-key: bad-api-key
+          build-path: tests/fixtures/app.ipa
+          branch-name: main
+          skip-processing: 'true'
+      - name: Assert action failed after the upload error
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+        run: |
+          cat /tmp/mock-applivery/requests.log
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ -z "$PUB_ID" ] || { echo "FAIL: no publication-id expected"; exit 1; }
+          grep -q '^POST /upload/v1/integrations/builds$' /tmp/mock-applivery/requests.log || { echo "FAIL: upload not attempted"; exit 1; }
+          if grep -q 'integrations/distributions' /tmp/mock-applivery/requests.log; then
+            echo "FAIL: should not proceed to publications"; exit 1
+          fi
+          echo "PASS"

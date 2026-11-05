@@ -1,0 +1,60 @@
+name: Test existing publication is reused
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API (ephemeral port)
+        id: mock
+        run: |
+          export MOCK_PORT=0
+          rm -f /tmp/mock-applivery/port
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery.out 2>&1 &
+          for i in $(seq 1 30); do
+            if [ -s /tmp/mock-applivery/port ]; then
+              PORT=$(cat /tmp/mock-applivery/port)
+              if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; then
+                echo "mock ready on $PORT"
+                echo "port=$PORT" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 1
+          done
+          cat /tmp/mock-applivery.out
+          exit 1
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:${{ steps.mock.outputs.port }}/v1
+          base-uploads-url: http://127.0.0.1:${{ steps.mock.outputs.port }}/upload/v1
+          api-key: test-api-key
+          build-path: tests/fixtures/app.ipa
+          branch-name: main
+          slug-name: Existing-Slug
+          skip-processing: 'true'
+      - name: Assert outputs
+        env:
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+          PUB_URL: ${{ steps.action.outputs.publication-distribution-url }}
+        run: |
+          echo "id: $PUB_ID"; echo "slug: $PUB_SLUG"; echo "url: $PUB_URL"
+          [ "$PUB_ID" = "pub-existing" ] || { echo "FAIL: expected pub-existing"; exit 1; }
+          [ "$PUB_SLUG" = "existing-slug" ] || { echo "FAIL: expected existing-slug"; exit 1; }
+          [ "$PUB_URL" = "https://dl.example.test/existing-slug" ] || { echo "FAIL: unexpected url"; exit 1; }
+          echo "PASS"
+      - name: Assert no publication was created
+        run: |
+          cat /tmp/mock-applivery/requests.log
+          grep -q '^POST /upload/v1/integrations/builds$' /tmp/mock-applivery/requests.log || { echo "FAIL: no upload request"; exit 1; }
+          grep -q '^GET /v1/integrations/distributions?slug=existing-slug' /tmp/mock-applivery/requests.log || { echo "FAIL: lookup should use lowercased slug"; exit 1; }
+          if grep -q '^POST /v1/integrations/distributions' /tmp/mock-applivery/requests.log; then
+            echo "FAIL: should not create a publication when one exists"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,77 @@
+name: Test basic usage (new publication, slug from branch name)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API (ephemeral port)
+        id: mock
+        run: |
+          export MOCK_PORT=0
+          rm -f /tmp/mock-applivery/port
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery.out 2>&1 &
+          for i in $(seq 1 30); do
+            if [ -s /tmp/mock-applivery/port ]; then
+              PORT=$(cat /tmp/mock-applivery/port)
+              if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; then
+                echo "mock ready on $PORT"
+                echo "port=$PORT" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 1
+          done
+          cat /tmp/mock-applivery.out
+          exit 1
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:${{ steps.mock.outputs.port }}/v1/
+          base-uploads-url: http://127.0.0.1:${{ steps.mock.outputs.port }}/upload/v1/
+          api-key: test-api-key
+          build-path: tests/fixtures/app.ipa
+          branch-name: feature/My_Branch
+          changelog: Basic test changelog
+          wait-time: '1'
+      - name: Assert outputs
+        env:
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+          PUB_URL: ${{ steps.action.outputs.publication-distribution-url }}
+          QR: ${{ steps.action.outputs.qr-code }}
+        run: |
+          echo "id: $PUB_ID"; echo "slug: $PUB_SLUG"; echo "url: $PUB_URL"
+          echo "$QR"
+          fail=0
+          [ "$PUB_ID" = "pub-new" ] || { echo "FAIL: expected id pub-new"; fail=1; }
+          [ "$PUB_SLUG" = "feature-my-branch" ] || { echo "FAIL: expected slug feature-my-branch"; fail=1; }
+          [ "$PUB_URL" = "https://dl.example.test/feature-my-branch" ] || { echo "FAIL: unexpected url"; fail=1; }
+          [ -n "$(echo "$QR" | tr -d '[:space:]')" ] || { echo "FAIL: qr-code empty"; fail=1; }
+          [ "$fail" = "0" ] || exit 1
+          echo "PASS"
+      - name: Assert requests sent to the API
+        run: |
+          cat /tmp/mock-applivery/requests.log
+          grep -q '^POST /upload/v1/integrations/builds$' /tmp/mock-applivery/requests.log || { echo "FAIL: no upload request"; exit 1; }
+          grep -q '^GET /v1/integrations/distributions?slug=feature-my-branch' /tmp/mock-applivery/requests.log || { echo "FAIL: no publication lookup"; exit 1; }
+          grep -q '^POST /v1/integrations/distributions$' /tmp/mock-applivery/requests.log || { echo "FAIL: no publication create"; exit 1; }
+          if grep -q '^GET /v1/integrations/builds/' /tmp/mock-applivery/requests.log; then echo "FAIL: should not poll an already processed build"; exit 1; fi
+          grep -q 'Bearer test-api-key' /tmp/mock-applivery/last-auth.txt || { echo "FAIL: missing bearer auth"; exit 1; }
+          UPLOAD=/tmp/mock-applivery/upload-build.txt
+          grep -q 'dummy-ipa-content-for-applivery-action-tests' "$UPLOAD" || { echo "FAIL: build file not uploaded"; exit 1; }
+          grep -q 'filename="app.ipa"' "$UPLOAD" || { echo "FAIL: filename missing"; exit 1; }
+          grep -q 'Basic test changelog' "$UPLOAD" || { echo "FAIL: changelog missing"; exit 1; }
+          grep -q 'feature/My_Branch' "$UPLOAD" || { echo "FAIL: versionName missing"; exit 1; }
+          CREATE=$(cat /tmp/mock-applivery/create-publication.json)
+          echo "create payload: $CREATE"
+          echo "$CREATE" | grep -q '"slug":"feature-my-branch"' || { echo "FAIL: slug in payload"; exit 1; }
+          # With no tags input the action splits '' into [''] and so builds a tag filter with an empty value
+          echo "$CREATE" | grep -q '"filter":{"type":"tag","value":""}' || { echo "FAIL: unexpected filter"; exit 1; }
+          echo "$CREATE" | grep -q '"visibility":"unlisted"' || { echo "FAIL: visibility should be unlisted"; exit 1; }
+          echo "$CREATE" | grep -q '"security":"public"' || { echo "FAIL: security should be public"; exit 1; }
+          echo "PASS"

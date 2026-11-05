@@ -1,0 +1,77 @@
+name: Applivery Deploy
+author: Danny Gilbert <dgilbert-foreflight>
+description: 'Deploy to Applivery'
+branding:
+  icon: 'activity'
+  color: 'yellow'
+
+inputs:
+  base-url:
+    description: 'Base URL for the Applivery API'
+    required: false
+    default: https://api.applivery.io/v1/
+  base-uploads-url:
+    description: 'Base URL for the Applivery Uploads API'
+    required: false
+    default: https://upload.applivery.io/v1/
+  api-key:
+    description: 'Applivery API Key (Scoped to your Application)'
+    required: true
+  build-path:
+    description: 'Path to the .ipa|.apk|.aab file'
+    required: true
+  branch-name:
+    description:
+      'Git Branch name to be monitored for the publication (Defaults to
+      github.context.ref_name)'
+    required: false
+  slug-name:
+    description:
+      'Slug name for the publication (Optional, defaults to the branch name)'
+    required: false
+  publication-password:
+    description:
+      'Password for the publication (Optional, creates a public publication if
+      not provided)'
+    required: false
+  changelog:
+    description:
+      'Changelog for the publication (Optional, defaults to the latest commit
+      message)'
+    required: false
+  tags:
+    description: 'Comma separated tags for the build'
+    required: false
+  skip-processing:
+    description:
+      'Skip waiting for the build to be processed (Optional, defaults to false)'
+    required: false
+    default: 'false'
+  max-attempts:
+    description:
+      'Maximum number of attempts to check the build status (Optional, defaults
+      to 10)'
+    required: false
+    default: '10'
+  wait-time:
+    description:
+      'Time to wait (in seconds) between attempts to check the build status
+      (Optional, defaults to 30 seconds)'
+    required: false
+    default: '30'
+
+outputs:
+  publication-id:
+    description: 'ID of the publication'
+  publication-slug:
+    description: 'Slug of the publication'
+  publication-distribution-url:
+    description: 'Distribution URL of the publication'
+  qr-code:
+    description:
+      'QR Code for the publication distribution URL (Text based image)'
+
+runs:
+  pre: chainguard-phonehome.js
+  using: node24
+  main: dist/index.js
