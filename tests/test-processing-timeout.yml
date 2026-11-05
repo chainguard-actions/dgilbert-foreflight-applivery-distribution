@@ -1,0 +1,47 @@
+name: Test build processing timeout fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        env:
+          MOCK_UPLOAD_STATUS: queued
+          MOCK_GET_STATUS: processing
+        run: |
+          mkdir -p /tmp/mock
+          : > /tmp/mock/requests.log
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_applivery.py" 18086 /tmp/mock/requests.log > /tmp/mock/server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18086/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:18086/health || { cat /tmp/mock/server.log; exit 1; }
+          echo "dummy ipa content" > /tmp/mock/app.ipa
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          base-url: http://127.0.0.1:18086/v1/
+          base-uploads-url: http://127.0.0.1:18086/v1/
+          api-key: test-api-key
+          build-path: /tmp/mock/app.ipa
+          branch-name: main
+          max-attempts: '2'
+          wait-time: '1'
+      - name: Assert action failed after max attempts
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/mock/requests.log
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          n=$(grep -c '"method": "GET", "path": "/v1/integrations/builds/build-123"' /tmp/mock/requests.log || true)
+          echo "polls: $n"
+          [ "$n" = "2" ] || { echo "FAIL: expected 2 status polls"; exit 1; }
+          if grep -q 'integrations/distributions' /tmp/mock/requests.log; then
+            echo "FAIL: publications should not be touched after timeout"; exit 1
+          fi
+          echo "PASS"

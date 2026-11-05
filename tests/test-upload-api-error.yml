@@ -1,0 +1,44 @@
+name: Test upload API error fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        env:
+          MOCK_UPLOAD_HTTP: '500'
+        run: |
+          mkdir -p /tmp/mock
+          : > /tmp/mock/requests.log
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_applivery.py" 18089 /tmp/mock/requests.log > /tmp/mock/server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18089/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:18089/health || { cat /tmp/mock/server.log; exit 1; }
+          echo "dummy ipa content" > /tmp/mock/app.ipa
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          base-url: http://127.0.0.1:18089/v1/
+          base-uploads-url: http://127.0.0.1:18089/v1/
+          api-key: test-api-key
+          build-path: /tmp/mock/app.ipa
+          branch-name: main
+      - name: Assert action failed on API error
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          BUILD_ID: ${{ steps.action.outputs.build-id }}
+        run: |
+          echo "outcome: $OUTCOME"; echo "build-id: $BUILD_ID"
+          cat /tmp/mock/requests.log
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ -z "$BUILD_ID" ] || { echo "FAIL: build-id should be empty"; exit 1; }
+          grep -q '"method": "POST", "path": "/v1/integrations/builds"' /tmp/mock/requests.log || { echo "FAIL: upload not attempted"; exit 1; }
+          if grep -q 'integrations/distributions' /tmp/mock/requests.log; then
+            echo "FAIL: publications should not be touched"; exit 1
+          fi
+          echo "PASS"

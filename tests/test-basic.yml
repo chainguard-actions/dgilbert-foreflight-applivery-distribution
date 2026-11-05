@@ -1,0 +1,67 @@
+name: Test basic upload and new publication
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        run: |
+          mkdir -p /tmp/mock
+          : > /tmp/mock/requests.log
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_applivery.py" 18081 /tmp/mock/requests.log > /tmp/mock/server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18081/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:18081/health || { cat /tmp/mock/server.log; exit 1; }
+          echo "dummy ipa content" > /tmp/mock/app.ipa
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:18081/v1/
+          base-uploads-url: http://127.0.0.1:18081/v1/
+          api-key: test-api-key
+          build-path: /tmp/mock/app.ipa
+          branch-name: feature/my_branch
+          changelog: Test changelog entry
+      - name: Assert outputs
+        env:
+          BUILD_ID: ${{ steps.action.outputs.build-id }}
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+          PUB_URL: ${{ steps.action.outputs.publication-distribution-url }}
+          QR: ${{ steps.action.outputs.qr-code }}
+        run: |
+          echo "build-id: $BUILD_ID"; echo "publication-id: $PUB_ID"
+          echo "slug: $PUB_SLUG"; echo "url: $PUB_URL"
+          [ "$BUILD_ID" = "build-123" ] || { echo "FAIL: build-id"; exit 1; }
+          [ "$PUB_ID" = "pub-new" ] || { echo "FAIL: publication-id"; exit 1; }
+          [ "$PUB_SLUG" = "feature-my-branch" ] || { echo "FAIL: slug"; exit 1; }
+          [ "$PUB_URL" = "https://dl.example.com/feature-my-branch" ] || { echo "FAIL: url"; exit 1; }
+          [ -n "$QR" ] || { echo "FAIL: qr-code empty"; exit 1; }
+          echo "PASS"
+      - name: Assert requests sent to the API
+        run: |
+          cat /tmp/mock/requests.log
+          python3 - <<'EOF'
+          import json, sys
+          reqs = [json.loads(l) for l in open('/tmp/mock/requests.log') if l.strip()]
+          up = [r for r in reqs if r['method'] == 'POST' and r['path'].endswith('/v1/integrations/builds')]
+          if len(up) != 1: sys.exit('FAIL: expected one upload, got %d' % len(up))
+          b = up[0]['body']
+          for needle in ['dummy ipa content', 'feature/my_branch', 'Test changelog entry', 'ios']:
+              if needle not in b: sys.exit('FAIL: upload body missing %r' % needle)
+          q = [r for r in reqs if r['method'] == 'GET' and '/v1/integrations/distributions' in r['path']]
+          if not q or 'slug=feature-my-branch' not in q[0]['path']: sys.exit('FAIL: publication lookup by slug missing')
+          c = [r for r in reqs if r['method'] == 'POST' and r['path'].endswith('/v1/integrations/distributions')]
+          if len(c) != 1: sys.exit('FAIL: expected one publication create, got %d' % len(c))
+          p = json.loads(c[0]['body'])
+          if p['slug'] != 'feature-my-branch': sys.exit('FAIL: slug %r' % p['slug'])
+          if p['security'] != 'public': sys.exit('FAIL: security %r' % p['security'])
+          if p['filter'] != {'type': 'gitBranch', 'value': 'feature/my_branch'}: sys.exit('FAIL: filter %r' % p['filter'])
+          if p['visibility'] != 'unlisted': sys.exit('FAIL: visibility')
+          if any('/integrations/builds/' in r['path'] for r in reqs): sys.exit('FAIL: unexpected build status poll')
+          print('PASS')
+          EOF
