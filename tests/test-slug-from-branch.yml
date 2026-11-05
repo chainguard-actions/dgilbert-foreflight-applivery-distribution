@@ -1,0 +1,41 @@
+name: Test slug derived from branch name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        run: |
+          rm -rf /tmp/mock-applivery && mkdir -p /tmp/mock-applivery
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18080/health || { cat /tmp/mock-applivery/server.log; exit 1; }
+          echo "fake ipa content" > /tmp/app.ipa
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:18080/v1
+          base-uploads-url: http://127.0.0.1:18080/upload/v1
+          api-key: test-api-key
+          build-path: /tmp/app.ipa
+          branch-name: feature/My_Branch.1
+          skip-processing: 'true'
+      - name: Assert sanitized slug
+        env:
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+        run: |
+          echo "slug: $PUB_SLUG"
+          cat /tmp/mock-applivery/requests.log
+          [ "$PUB_SLUG" = "feature-my-branch-1" ] || { echo "FAIL: expected feature-my-branch-1"; exit 1; }
+          CB=$(cat /tmp/mock-applivery/create-body.json); echo "$CB"
+          echo "$CB" | grep -q '"value":"feature/My_Branch.1"' || { echo "FAIL: filter should use raw branch"; exit 1; }
+          grep -q 'feature/My_Branch.1' /tmp/mock-applivery/upload-body.txt || { echo "FAIL: versionName"; exit 1; }
+          echo "PASS"

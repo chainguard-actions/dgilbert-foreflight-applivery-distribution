@@ -1,0 +1,65 @@
+name: Test basic upload creates new publication
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        run: |
+          rm -rf /tmp/mock-applivery && mkdir -p /tmp/mock-applivery
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18080/health || { cat /tmp/mock-applivery/server.log; exit 1; }
+          echo "fake ipa content" > /tmp/app.ipa
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:18080/v1/
+          base-uploads-url: http://127.0.0.1:18080/upload/v1/
+          api-key: test-api-key
+          build-path: /tmp/app.ipa
+          branch-name: main
+          changelog: Test changelog entry
+          skip-processing: 'true'
+      - name: Assert outputs
+        env:
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+          PUB_URL: ${{ steps.action.outputs.publication-distribution-url }}
+          QR: ${{ steps.action.outputs.qr-code }}
+        run: |
+          echo "id: $PUB_ID"; echo "slug: $PUB_SLUG"; echo "url: $PUB_URL"
+          echo "$QR"
+          [ "$PUB_ID" = "pub-new" ] || { echo "FAIL: id"; exit 1; }
+          [ "$PUB_SLUG" = "main" ] || { echo "FAIL: slug"; exit 1; }
+          [ "$PUB_URL" = "https://example.applivery.io/main" ] || { echo "FAIL: url"; exit 1; }
+          [ -n "$QR" ] || { echo "FAIL: empty qr-code"; exit 1; }
+          echo "PASS"
+      - name: Assert requests sent to mock
+        run: |
+          cat /tmp/mock-applivery/requests.log
+          grep -q '^POST /upload/v1/integrations/builds auth=Bearer test-api-key' /tmp/mock-applivery/requests.log || { echo "FAIL: no upload"; exit 1; }
+          grep -q '^GET /v1/integrations/distributions?slug=main' /tmp/mock-applivery/requests.log || { echo "FAIL: no fetch"; exit 1; }
+          grep -q '^POST /v1/integrations/distributions' /tmp/mock-applivery/requests.log || { echo "FAIL: no create"; exit 1; }
+          if grep -q '^GET /v1/integrations/builds/' /tmp/mock-applivery/requests.log; then
+            echo "FAIL: build status polled despite skip-processing"; exit 1
+          fi
+          UP=/tmp/mock-applivery/upload-body.txt
+          grep -q 'fake ipa content' "$UP" || { echo "FAIL: build file not uploaded"; exit 1; }
+          grep -q 'Test changelog entry' "$UP" || { echo "FAIL: changelog missing"; exit 1; }
+          grep -q 'name="buildPlatform"' "$UP" || { echo "FAIL: buildPlatform missing"; exit 1; }
+          grep -q 'filename="app.ipa"' "$UP" || { echo "FAIL: filename missing"; exit 1; }
+          CB=$(cat /tmp/mock-applivery/create-body.json); echo "$CB"
+          echo "$CB" | grep -q '"slug":"main"' || { echo "FAIL: create slug"; exit 1; }
+          echo "$CB" | grep -q '"security":"public"' || { echo "FAIL: security"; exit 1; }
+          echo "$CB" | grep -q '"type":"gitBranch"' || { echo "FAIL: filter type"; exit 1; }
+          echo "$CB" | grep -q '"value":"main"' || { echo "FAIL: filter value"; exit 1; }
+          echo "PASS"

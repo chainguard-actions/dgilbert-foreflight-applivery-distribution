@@ -1,0 +1,47 @@
+name: Test existing publication is reused
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        run: |
+          rm -rf /tmp/mock-applivery && mkdir -p /tmp/mock-applivery
+          MOCK_EXISTING_SLUG=my-release nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18080/health || { cat /tmp/mock-applivery/server.log; exit 1; }
+          echo "fake apk content" > /tmp/app.apk
+      - id: action
+        uses: .
+        with:
+          base-url: http://127.0.0.1:18080/v1/
+          base-uploads-url: http://127.0.0.1:18080/upload/v1/
+          api-key: test-api-key
+          build-path: /tmp/app.apk
+          branch-name: develop
+          slug-name: My-Release
+          skip-processing: 'true'
+      - name: Assert existing publication outputs
+        env:
+          PUB_ID: ${{ steps.action.outputs.publication-id }}
+          PUB_SLUG: ${{ steps.action.outputs.publication-slug }}
+          PUB_URL: ${{ steps.action.outputs.publication-distribution-url }}
+        run: |
+          echo "id: $PUB_ID"; echo "slug: $PUB_SLUG"; echo "url: $PUB_URL"
+          cat /tmp/mock-applivery/requests.log
+          [ "$PUB_ID" = "pub-existing" ] || { echo "FAIL: id"; exit 1; }
+          [ "$PUB_SLUG" = "my-release" ] || { echo "FAIL: slug (should be lowercased)"; exit 1; }
+          [ "$PUB_URL" = "https://example.applivery.io/my-release" ] || { echo "FAIL: url"; exit 1; }
+          grep -q '^GET /v1/integrations/distributions?slug=my-release' /tmp/mock-applivery/requests.log || { echo "FAIL: fetch slug"; exit 1; }
+          if grep -q '^POST /v1/integrations/distributions' /tmp/mock-applivery/requests.log; then
+            echo "FAIL: publication created although one existed"; exit 1
+          fi
+          echo "PASS"

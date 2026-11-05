@@ -1,0 +1,42 @@
+name: Test missing build file fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Applivery API
+        run: |
+          rm -rf /tmp/mock-applivery && mkdir -p /tmp/mock-applivery
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-applivery.cjs" > /tmp/mock-applivery/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18080/health || { cat /tmp/mock-applivery/server.log; exit 1; }
+          rm -f /tmp/does-not-exist.ipa
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          base-url: http://127.0.0.1:18080/v1/
+          base-uploads-url: http://127.0.0.1:18080/upload/v1/
+          api-key: test-api-key
+          build-path: /tmp/does-not-exist.ipa
+          branch-name: main
+          skip-processing: 'true'
+      - name: Assert failure without API calls
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          if [ -s /tmp/mock-applivery/requests.log ]; then
+            cat /tmp/mock-applivery/requests.log
+            echo "FAIL: API should not be called for missing build"; exit 1
+          fi
+          echo "PASS"
